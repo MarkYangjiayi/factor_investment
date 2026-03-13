@@ -1,0 +1,23 @@
+# 核心数据处理与矩阵运算
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# 异步网络请求 (用于高并发拉取 EODHD 数据)
+aiohttp>=3.8.0
+asyncio
+
+# 高性能数据存储引擎 (支持 pandas 直接读写 parquet)
+pyarrow>=12.0.0
+
+# 环境变量与配置管理 (用于安全加载 EODHD_API_KEY)
+python-dotenv>=1.0.0
+
+# 投研与回测环境
+jupyter>=1.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# 单因子评价 (避坑：原版 alphalens 已经很久没维护了，会和新版 pandas 冲突)
+# 必须使用社区维护的 alphalens-reloaded
+alphalens-reloaded>=0.4.3
