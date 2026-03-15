@@ -101,11 +101,15 @@ class TreeFactorCombiner:
         
         # Instantiate LightGBM Regressor
         self.model = LGBMRegressor(
-            n_estimators=100, 
-            max_depth=5, 
-            learning_rate=0.05, 
+            n_estimators=150,           # 稍微增加树的数量，配合较低的学习率
+            learning_rate=0.02,         # 降低学习率，让模型学得更慢、更稳
+            max_depth=4,                # 强制降低树的深度，防止在噪音中过度分裂
+            num_leaves=15,              # 限制叶子节点数量，进一步强防过拟合
+            min_child_samples=300,      # 核心！要求每个叶子节点至少有300个样本，否则不分裂
+            objective='huber',          # 终极杀器：使用 Huber Loss 代替默认的 MSE 均方误差，对股票异动（Outliers）极度鲁棒
             random_state=42, 
-            n_jobs=-1
+            n_jobs=-1,
+            verbose=-1                  # 屏蔽掉那个烦人的 info 级别 Warning
         )
         
         # Fit the model on (X_train, y_train)
