@@ -67,9 +67,8 @@ class TreeFactorCombiner:
         master_df = self.prepare_data(factor_dict, price_df)
         
         train_df = master_df[master_df.index.get_level_values('date') <= self.train_end_date].copy()
-        test_df = master_df[master_df.index.get_level_values('date') > self.train_end_date].copy()
-        
-        if test_df.empty or train_df.empty:
+
+        if train_df.empty:
             raise ValueError("Insufficient data after train/test split.")
 
         feature_cols = list(factor_dict.keys())
@@ -89,7 +88,6 @@ class TreeFactorCombiner:
         group_train = train_df.groupby(level='date').size().values
         
         X_train = train_df[feature_cols]
-        X_test = test_df[feature_cols]
         
         # 实例化 Ranker
         self.model = LGBMRanker(
@@ -106,11 +104,8 @@ class TreeFactorCombiner:
         print(f"Training LGBMRanker on {len(X_train)} samples across {len(group_train)} cross-sections...")
         self.model.fit(X_train, y_train_labels, group=group_train)
         
-        print(f"Predicting ranks on {len(X_test)} out-of-sample periods...")
-        # 预测输出的是一个用于排序的打分 (Raw Score)
-        predictions = self.model.predict(X_test)
-        
-        pred_series = pd.Series(predictions, index=X_test.index, name='ml_combined_score')
-        final_scores_wide = pred_series.unstack(level='ticker')
-        
-        return final_scores_wide
+        print(f"Predicting ranks on full dataset ({len(master_df)} samples)...")
+        predictions_all = self.model.predict(master_df[feature_cols])
+        master_df['ml_combined_score'] = predictions_all
+
+        return master_df
