@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from lightgbm import LGBMRegressor
+from lightgbm import LGBMRanker
 from typing import Dict
 
 class TreeFactorCombiner:
@@ -64,66 +64,53 @@ class TreeFactorCombiner:
         return merged_df
 
     def train_and_predict(self, factor_dict: Dict[str, pd.DataFrame], price_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Trains the LightGBM model on historical data and predicts factor scores for the out-of-sample period.
-
-        Args:
-            factor_dict (Dict[str, pd.DataFrame]): Dictionary mapping factor names to their wide-format DataFrames.
-            price_df (pd.DataFrame): Wide-format DataFrame of historical prices (Dates x Tickers).
-
-        Returns:
-            pd.DataFrame: A wide-format DataFrame (Dates x Tickers) representing the final 
-                          combined ML factor scores for the out-of-sample period.
-        """
-        # Call prepare_data to get the master dataset
         master_df = self.prepare_data(factor_dict, price_df)
         
-        # Split the dataset based on self.train_end_date
-        # Index level 0 is 'date'
-        train_df = master_df[master_df.index.get_level_values('date') <= self.train_end_date]
-        test_df = master_df[master_df.index.get_level_values('date') > self.train_end_date]
+        train_df = master_df[master_df.index.get_level_values('date') <= self.train_end_date].copy()
+        test_df = master_df[master_df.index.get_level_values('date') > self.train_end_date].copy()
         
-        if test_df.empty:
-            raise ValueError(f"No test data available after train_end_date: {self.train_end_date}")
-            
-        if train_df.empty:
-            raise ValueError(f"No training data available before train_end_date: {self.train_end_date}")
+        if test_df.empty or train_df.empty:
+            raise ValueError("Insufficient data after train/test split.")
 
         feature_cols = list(factor_dict.keys())
         target_col = 'forward_return'
         
-        # Separate X_train, y_train and X_test, y_test
+        # --- LambdaRank 核心改造开始 ---
+        # 1. 必须严格按日期排序，这是 LightGBM 分组的前提
+        train_df = train_df.sort_index(level='date')
+        
+        # 2. 将连续收益率转化为横截面上的 0-4 档整数标签 (Relevance Score)
+        # 0 是最差，4 是最好
+        y_train_labels = train_df.groupby(level='date')[target_col].transform(
+            lambda x: pd.qcut(x, q=5, labels=False, duplicates='drop')
+        ).fillna(2).astype(int) # 如果出现极少量的 NaN，填入中间档位 2
+        
+        # 3. 计算每天截面上的样本数 (Group Array)
+        group_train = train_df.groupby(level='date').size().values
+        
         X_train = train_df[feature_cols]
-        y_train = train_df[target_col]
-        
         X_test = test_df[feature_cols]
-        # y_test is not strictly needed for prediction, but good practice
         
-        # Instantiate LightGBM Regressor
-        self.model = LGBMRegressor(
-            n_estimators=150,           # 稍微增加树的数量，配合较低的学习率
-            learning_rate=0.02,         # 降低学习率，让模型学得更慢、更稳
-            max_depth=4,                # 强制降低树的深度，防止在噪音中过度分裂
-            num_leaves=15,              # 限制叶子节点数量，进一步强防过拟合
-            min_child_samples=300,      # 核心！要求每个叶子节点至少有300个样本，否则不分裂
-            objective='huber',          # 终极杀器：使用 Huber Loss 代替默认的 MSE 均方误差，对股票异动（Outliers）极度鲁棒
-            random_state=42, 
+        # 实例化 Ranker
+        self.model = LGBMRanker(
+            n_estimators=150,
+            learning_rate=0.02,
+            max_depth=4,
+            num_leaves=15,
+            min_child_samples=300,
+            random_state=42,
             n_jobs=-1,
-            verbose=-1                  # 屏蔽掉那个烦人的 info 级别 Warning
+            importance_type='gain'
         )
         
-        # Fit the model on (X_train, y_train)
-        print(f"Training LightGBM model on {len(X_train)} samples...")
-        self.model.fit(X_train, y_train)
+        print(f"Training LGBMRanker on {len(X_train)} samples across {len(group_train)} cross-sections...")
+        self.model.fit(X_train, y_train_labels, group=group_train)
         
-        # Predict on X_test
-        print(f"Predicting on {len(X_test)} out-of-sample periods...")
+        print(f"Predicting ranks on {len(X_test)} out-of-sample periods...")
+        # 预测输出的是一个用于排序的打分 (Raw Score)
         predictions = self.model.predict(X_test)
         
-        # Create a Series with the predictions, keeping the (date, ticker) index from X_test
         pred_series = pd.Series(predictions, index=X_test.index, name='ml_combined_score')
-        
-        # Unstack this Series back into a wide DataFrame (Dates x Tickers)
         final_scores_wide = pred_series.unstack(level='ticker')
         
         return final_scores_wide

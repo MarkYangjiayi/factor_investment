@@ -56,21 +56,32 @@ def process_and_merge_fundamentals(ticker: str, raw_price_df: pd.DataFrame, fund
     inc = financials.get('Income_Statement', {}).get('quarterly', {})
     cf = financials.get('Cash_Flow', {}).get('quarterly', {})
 
+    def safe_float(val):
+        try:
+            return float(val) if val and val != 'null' else np.nan
+        except:
+            return np.nan
+
+    # Build a unified date set across all three statements so that income/cashflow
+    # entries at dates not present in the balance sheet (e.g. annual-only filings)
+    # are also captured, and bs entries with no matching inc/cf row fall back
+    # gracefully to NaN rather than silently dropping the data.
+    all_period_dates = set(bs.keys()) | set(inc.keys()) | set(cf.keys())
+
     records = []
-    
-    for date_str, bs_data in bs.items():
+
+    for date_str in all_period_dates:
+        bs_data  = bs.get(date_str, {})
         inc_data = inc.get(date_str, {})
-        cf_data = cf.get(date_str, {})
-        
-        filing_date = bs_data.get('filing_date')
-        if not filing_date or filing_date == 'null':
+        cf_data  = cf.get(date_str, {})
+
+        filing_date = bs_data.get('filing_date') or inc_data.get('filing_date') or cf_data.get('filing_date')
+        # filing_date == date_str means EODHD is returning the fiscal period-end as the
+        # "filing date" — a known data quality gap for older quarters. In reality, SEC
+        # quarterly filings (10-Q/10-K) require 40-45 days after period end, so Δ=0
+        # is impossible and introduces pure lookahead bias. Apply the same +45d fallback.
+        if not filing_date or filing_date in ('null', date_str):
             filing_date = (pd.to_datetime(date_str) + pd.Timedelta(days=45)).strftime('%Y-%m-%d')
-            
-        def safe_float(val):
-            try:
-                return float(val) if val and val != 'null' else np.nan
-            except:
-                return np.nan
 
         records.append({
             'filing_date': pd.to_datetime(filing_date),
@@ -98,15 +109,18 @@ def process_and_merge_fundamentals(ticker: str, raw_price_df: pd.DataFrame, fund
     if not isinstance(raw_price_df.index, pd.DatetimeIndex):
         raw_price_df.index = pd.to_datetime(raw_price_df.index)
     
-    # Safe Left Join ensures no trading days are dropped, even if a filing date was on a weekend
-    merged_df = raw_price_df.join(fund_df, how='left')
-    
-    fund_cols = ['netIncome', 'totalAssets', 'totalOperatingCashFlows', 'longTermDebt', 
-                 'totalCurrentAssets', 'totalCurrentLiabilities', 'commonStockSharesOutstanding', 
+    fund_cols = ['netIncome', 'totalAssets', 'totalOperatingCashFlows', 'longTermDebt',
+                 'totalCurrentAssets', 'totalCurrentLiabilities', 'commonStockSharesOutstanding',
                  'grossProfit', 'totalRevenue']
-    
-    # Forward fill the fundamentals
-    merged_df[fund_cols] = merged_df[fund_cols].ffill(limit=120)
+
+    # Many tickers use period-end dates (Mar 31, Jun 30, Sep 30, Dec 31) as filing dates.
+    # These frequently fall on weekends, so an exact-date left join would silently drop those
+    # quarters, and ffill would eventually run out, producing long NaN gaps.
+    # Fix: expand to the union of price and filing dates, ffill across that combined index,
+    # then select back to trading days only.
+    all_dates = raw_price_df.index.union(fund_df.index).sort_values()
+    fund_aligned = fund_df.reindex(all_dates).ffill(limit=130).reindex(raw_price_df.index)
+    merged_df = raw_price_df.join(fund_aligned, how='left')
     
     # Calculate ratios safely
     merged_df['roa'] = merged_df['netIncome'] / merged_df['totalAssets']

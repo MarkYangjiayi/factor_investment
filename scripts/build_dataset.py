@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pandas as pd
 from pathlib import Path
 import logging
@@ -19,59 +20,64 @@ logger = logging.getLogger(__name__)
 
 async def build_all():
     """
-    Iterates through all raw price data, fetches corresponding fundamental data,
-    merges them, and saves the result to the processed directory.
+    Fetches fundamental data for all raw tickers in parallel with a semaphore-bounded
+    concurrency of 15, matching the rate-limiting strategy used in download_data.py.
     """
     raw_path = Path(RAW_DIR)
     processed_path = Path(PROCESSED_DIR)
-    
-    # Ensure processed directory exists
+
     processed_path.mkdir(parents=True, exist_ok=True)
-    
-    # Get all parquet files
+
     parquet_files = list(raw_path.glob("*.parquet"))
-    
+
     if not parquet_files:
         logger.warning(f"No parquet files found in {RAW_DIR}")
         return
 
     logger.info(f"Found {len(parquet_files)} tickers to process.")
+    start_time = time.time()
 
-    for file_path in parquet_files:
+    semaphore = asyncio.Semaphore(15)
+
+    async def bounded_process(file_path: Path):
         ticker = file_path.stem  # e.g., 'AAPL.US'
-        
-        try:
-            logger.info(f"Processing {ticker}...")
-            
-            # 1. Load Raw Price Data
+        async with semaphore:
+            await asyncio.sleep(0.05)  # stagger TCP connection bursts
             raw_price_df = pd.read_parquet(file_path)
-            
             if raw_price_df.empty:
                 logger.warning(f"Raw data for {ticker} is empty. Skipping.")
-                continue
+                return None
 
-            # 2. Fetch Fundamentals
             fundamentals_data = await fetch_fundamentals(ticker)
-            
             if not fundamentals_data:
-                logger.warning(f"No fundamental data fetched for {ticker}. Skipping merge.")
-                # Depending on requirements, we might want to save just the price data 
-                # or skip it. Here we'll skip to ensure data quality.
-                continue
+                logger.warning(f"No fundamental data fetched for {ticker}. Skipping.")
+                return None
 
-            # 3. Process and Merge
-            merged_df = process_and_merge_fundamentals(ticker, raw_price_df, fundamentals_data)
-            
-            # 4. Save to Processed Directory
-            output_path = processed_path / f"{ticker}.parquet"
-            merged_df.to_parquet(output_path)
-            
-            logger.info(f"Successfully processed and saved {ticker} to {output_path}")
+        # CPU-bound work runs outside the semaphore so the slot is freed for the next fetch
+        merged_df = process_and_merge_fundamentals(ticker, raw_price_df, fundamentals_data)
+        output_path = processed_path / f"{ticker}.parquet"
+        merged_df.to_parquet(output_path)
+        return ticker
 
-        except Exception as e:
-            logger.error(f"Failed to process {ticker}: {e}", exc_info=True)
+    tasks = [bounded_process(f) for f in parquet_files]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    logger.info("Data build process completed.")
+    success_count = 0
+    fail_count = 0
+    for file_path, result in zip(parquet_files, results):
+        if isinstance(result, Exception):
+            logger.error(f"Failed to process {file_path.stem}: {result}")
+            fail_count += 1
+        elif result is not None:
+            success_count += 1
+            if success_count % 50 == 0:
+                logger.info(f"Progress: {success_count} tickers processed...")
+
+    total_time = time.time() - start_time
+    logger.info(f"Build completed in {total_time:.2f}s. {success_count} succeeded, {fail_count} failed.")
 
 if __name__ == "__main__":
-    asyncio.run(build_all())
+    try:
+        asyncio.run(build_all())
+    except KeyboardInterrupt:
+        logger.info("Build was interrupted by the user.")
