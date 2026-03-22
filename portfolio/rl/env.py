@@ -75,28 +75,34 @@ class MultiFactorPortfolioEnv(gym.Env):
         # Calculate turnover
         turnover = np.sum(np.abs(target_weights - self.current_weights))
         
-        # Calculate transaction cost
-        tc = turnover * self.commission_rate
-        
+        # Physical transaction cost (unchanged, for accurate accounting)
+        real_transaction_cost = turnover * self.commission_rate
+
         # Get current step returns
         asset_returns = self.returns[self.current_step]
-        
+
         # Calculate portfolio return
         port_return = np.dot(target_weights, asset_returns)
-        
-        # Calculate Reward
-        reward = port_return - tc
-        
+
+        # Physical net return (for info/plotting only)
+        real_net_return = port_return - real_transaction_cost
+
+        # Reward shaping: amplified penalty to discourage jittering
+        penalty_rate = 0.0015  # 3x actual commission rate
+        action_penalty = turnover * penalty_rate
+        reward = port_return - action_penalty
+
         # Update state
         self.current_weights = target_weights
         self.current_step += 1
-        
+
         # Determine terminated
         terminated = self.current_step >= (self.num_dates - 1)
         truncated = False
-        
+
         return self._get_obs(), reward, terminated, truncated, {
             "portfolio_return": port_return,
             "turnover": turnover,
-            "transaction_cost": tc
+            "transaction_cost": real_transaction_cost,
+            "net_return": real_net_return
         }
