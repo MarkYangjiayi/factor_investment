@@ -45,20 +45,24 @@ class TreeFactorCombiner:
         # Concat them into a feature DataFrame X
         X = pd.concat(stacked_factors, axis=1)
         
-        # Calculate the forward return from price_df
-        # Formula: price_{t+forward_period} / price_t - 1
-        forward_returns = price_df.shift(-self.forward_period) / price_df - 1
-        
-        # Stack into a Series y
-        y = forward_returns.stack()
-        y.index.names = ['date', 'ticker']
-        y.name = 'forward_return'
-        
-        # Merge X and y on the (date, ticker) index
-        merged_df = X.join(y, how='inner')
-        
-        # Drop any rows where y or all features are NaN
-        merged_df = merged_df.dropna(subset=['forward_return'])
+        # Calculate TWO separate return columns:
+        # 1) forward_return_1d: strict 1-day physical return (for RL environment)
+        forward_returns_1d = price_df.shift(-1) / price_df - 1
+        y_1d = forward_returns_1d.stack()
+        y_1d.index.names = ['date', 'ticker']
+        y_1d.name = 'forward_return_1d'
+
+        # 2) forward_return_nd: N-day return (for LightGBM target)
+        forward_returns_nd = price_df.shift(-self.forward_period) / price_df - 1
+        y_nd = forward_returns_nd.stack()
+        y_nd.index.names = ['date', 'ticker']
+        y_nd.name = 'forward_return_nd'
+
+        # Merge X and both return columns on the (date, ticker) index
+        merged_df = X.join(y_1d, how='inner').join(y_nd, how='inner')
+
+        # Drop any rows where either return is NaN or all features are NaN
+        merged_df = merged_df.dropna(subset=['forward_return_1d', 'forward_return_nd'])
         merged_df = merged_df.dropna(subset=X.columns, how='all')
         
         return merged_df
@@ -72,7 +76,7 @@ class TreeFactorCombiner:
             raise ValueError("Insufficient data after train/test split.")
 
         feature_cols = list(factor_dict.keys())
-        target_col = 'forward_return'
+        target_col = 'forward_return_nd'
         
         # --- LambdaRank 核心改造开始 ---
         # 1. 必须严格按日期排序，这是 LightGBM 分组的前提

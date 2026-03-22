@@ -67,11 +67,31 @@ class MultiFactorPortfolioEnv(gym.Env):
         sum_action = np.sum(action)
         
         if sum_action > 1e-8:
-            target_weights = action / sum_action
+            new_weights = action / sum_action
         else:
             # Fallback to equal weights if sum is effectively 0
-            target_weights = np.full(self.num_stocks, 1.0 / self.num_stocks, dtype=np.float32)
-            
+            new_weights = np.full(self.num_stocks, 1.0 / self.num_stocks, dtype=np.float32)
+
+        # --- Institutional Execution Constraints ---
+        # 1) Sparsity: zero out positions below 0.5% — eliminates micro-noise
+        new_weights[new_weights < 0.005] = 0.0
+        w_sum = new_weights.sum()
+        if w_sum > 1e-8:
+            new_weights /= w_sum
+        else:
+            new_weights = np.full(self.num_stocks, 1.0 / self.num_stocks, dtype=np.float32)
+
+        # 2) Trade inertia (deadband): suppress changes < 1% per stock
+        deadband_mask = np.abs(new_weights - self.current_weights) < 0.01
+        new_weights[deadband_mask] = self.current_weights[deadband_mask]
+        w_sum = new_weights.sum()
+        if w_sum > 1e-8:
+            new_weights /= w_sum
+        else:
+            new_weights = np.full(self.num_stocks, 1.0 / self.num_stocks, dtype=np.float32)
+
+        target_weights = new_weights
+
         # Calculate turnover
         turnover = np.sum(np.abs(target_weights - self.current_weights))
         
